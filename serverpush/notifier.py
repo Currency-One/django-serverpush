@@ -1,40 +1,33 @@
+# -*- coding: utf-8 -*-
 '''
-	Event notifier.
+    Event notifier.
 '''
-
-import threading
-import logging
-import functools
-
-import tornado.ioloop
 import tornado.web
-import tornado.httpserver
 
-from django.conf import settings
+from exceptions import catch_exceptions
 
-logger = logging.getLogger('serverpush')
 
 class Notifier(tornado.web.RequestHandler):
-	def post(self):
-		model = self.get_argument('model', None)
-		id = self.get_argument('id', None)
 
-		if model is None or id is None:
-			logger.info('Malformed notification request.')
-			self.write('model and id parameters are required')
-			return
+    def post(self):
+        event = self.get_argument('event', None)
+        user = self.get_argument('user', None)
+        tm = self.get_argument('gen_timestamp', None)
+        #pozostale parametry
+        kwargs = dict((key, val[0] if val and isinstance(val, list) else val) for \
+                key,val in self.request.arguments.items() if \
+                key not in ['event', 'user', 'gen_timestamp'])
+        try:
+            self._handle(event, user, gen_timestamp=tm, **kwargs)
+            pass
+        except Exception as ex:
+            self.write('fail')
+            raise ex
 
-		tornado.ioloop.IOLoop.instance().add_callback(functools.partial(self.tracker.event, model, id))
-
-		logger.info('Notification added to the queue (%d).', len(tornado.ioloop.IOLoop.instance()._callbacks))
-		self.write('notification added to the queue')
-
-class NotifierThread(threading.Thread):
-	def run(self):
-		ioloop = tornado.ioloop.IOLoop()
-		application = tornado.web.Application(
-			[(r"/notify", Notifier)],
-		)
-		http_server = tornado.httpserver.HTTPServer(application, io_loop=ioloop)
-		http_server.listen(settings.SERVERPUSH_NOTIFIER_PORT, 'localhost')
-		ioloop.start()
+    @catch_exceptions
+    def _handle(self, event=None, user=None, channel=None, gen_timestamp=None, **kwargs):
+        if not event and channel:
+            event = channel
+        if event is None:
+            raise Exception('request nie zawiera zdarzenia')
+        self.tracker.event(event, gen_timestamp, user, **kwargs)

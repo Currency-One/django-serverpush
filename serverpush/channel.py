@@ -1,104 +1,145 @@
-'''
-	Channel sends notifications to users.
-'''
-
-import pickle
-import time
+# -*- coding: utf-8 -*-
 import logging
-from collections import deque
-from bisect import bisect_left
 
-from django.utils import translation
+from devlib.serverpush.active_events import active_events
 
-import cache
 
 logger = logging.getLogger('serverpush')
 
-class Channel():
-	def __init__(self):
-		self.maxsize = 200
-		self.history = deque(maxlen = self.maxsize)
-		self.connections = {}
 
-	# Called from Tracker when a new user connects
-	def newFilter(self, conn, filter):
-		if conn.id not in self.connections: self.connections[conn.id] = []
-		filter = {'name':filter['name'], 'params':filter['params'], 'serializer':filter.get('serializer', extract), 'vary':filter.get('vary'), 'data':filter['data'], 'conn':conn}
-		self.connections[conn.id].append(filter)
-		self.sendHistory(filter)
+class Channel(object):
 
-	# Called by Tracker on new event
-	def event(self, object):
-		self.history.append((time.time(), object))
+    def __init__(self, name, tracker, history=None):
+        self.tracker = tracker
+        self.name = name
+        self.event = active_events[name]
+        self.history = history
+        self.connections = {}
 
-		buffer = SendBuffer()
-		for conn in self.connections:
-			for filter in self.connections[conn]:
-				if object.filter(**filter['params']).exists():
-					try:
-						buffer.append(filter['conn'], self.serialize(filter, object))
-					except Exception, e:
-						logger.exception(e)
-		buffer.send()
+    def new_connection(self, conn):
+        '''
+            Rejestrowanie nowego polaczenia
+        '''
+        key = conn.get_user_id()
 
-		return True
+        if not self.connections.has_key(key):
+            self.connections[key] = {}
+        self.connections[key][conn.id] =  conn
 
-	# Called by newFilter
-	# sends history - events that happened after page was generated, but before javascript connected to the serverpush
-	def sendHistory(self, filter):
-		if not filter['conn'].timestamp:
-			return
+    @staticmethod
+    def init_event(conn, event_name, **kwargs):
+        '''
+            Wysyla event na polaczenie
+        '''
+        buffer = SendBuffer()
 
-		if len(self.history) == self.maxsize and self.history[0][0] > filter['conn'].timestamp:
-			filter['conn'].send({'name':'refresh'}) #history has failed us
-			return
+        buffer.append(conn, {
+            'name' : event_name,
+            'payload' : active_events[event_name].execute(conn.request, **kwargs),
+        })
+        buffer.send()
 
-		buffer = SendBuffer()
-		start = bisect_left(self.history, (filter['conn'].timestamp, None))
-		for i in range(start, len(self.history)):
-			object = self.history[i][1]
-			if object.filter(**filter['params']).exists():
-				try:
-					buffer.append(filter['conn'], self.serialize(filter, object))
-				except Exception, e:
-					logger.exception(e)
-		buffer.send()
+    # Called by Tracker on new event
+    def user_event(self, user_id, **kwargs):
+        '''
+            Wiadomosc do zalogowanego usera
+        '''
+        user_connections = self.connections.get(int(user_id), None)
+        if not user_connections:
+            return False
 
-	# Called by event and sendHistory
-	# serializes data (calls the serializer with right parameters)
-	def serialize(self, filter, object):
-		lang = translation.get_language_from_request(filter['conn'].request)
-		
-		cache_key = None
-		if filter['vary'] != None and cache.cache:
-			cache_key = pickle.dumps((filter['serializer'], lang, filter['vary']))
-			if cache_key in cache.cache:
-				return cache.cache[cache_key]
-		
-		translation.activate(lang)
-		data = {'name':filter['name'], 'payload':filter['serializer'](filter['conn'].request, object[0], filter['data'])}
-		
-		if cache_key:
-			cache.cache[cache_key] = data
-		return data
+        buffer = SendBuffer()
 
-#
-# Buffer to send all of the notifications at once
-#
+        if not kwargs.has_key('shared'):
+            if kwargs:
+                kwargs['shared'] = self.tracker.shared
+            else:
+                kwargs = {"shared": self.tracker.shared}
+
+        user = None
+        for con in user_connections.values():
+            if not user:
+                user = con.request.user
+            buffer.append(con, self.generate_message(user, **kwargs))
+
+        buffer.send()
+        logger.debug("User event: user %s ; event %s" % (user_id, self.name))
+
+        return True
+
+    def broadcast_event(self, event_timestamp, **kwargs):
+        '''
+            Broadcast do wszystkich userow (i anonimowych)
+        '''
+        buffer = SendBuffer()
+
+        if not kwargs.has_key('shared'):
+            if kwargs:
+                kwargs['shared'] = self.tracker.shared
+            else:
+                kwargs = {"shared": self.tracker.shared}
+
+        broadcast_msg = self.generate_message(**kwargs)
+        if not broadcast_msg['payload']:
+            return
+
+        if self.history:
+            self.history.append(broadcast_msg, event_timestamp  )
+
+        for user_connections in self.connections.values():
+            for con in user_connections.values():
+                buffer.append(con, broadcast_msg)
+
+        buffer.send()
+        logger.debug("Broadcast event: event %s" % ( self.name))
+
+
+        return True
+
+    def logout_event(self, user_id, connections_notified):
+        user_connections = self.connections.get(int(user_id), None)
+
+        if not user_connections:
+            return False
+
+        msg = {"name": "socketio_logout", "payload": ""}
+        buffer = SendBuffer()
+        for con in user_connections.values():
+            if not connections_notified.has_key(con.id):
+                buffer.append(con, msg)
+                connections_notified[con.id] = con
+
+        buffer.send()
+        return True
+
+    def generate_message(self, user=None, **kwargs):
+        '''
+            Generowanie wiadomosci do wyslania,
+        '''
+        if self.event.is_broadcast_event():
+            msg = self.event.execute(**kwargs)
+        else:
+            msg = self.event.execute(user, **kwargs)
+
+        return {
+            "name": self.name,
+            "payload": msg,
+        }
+
 class SendBuffer():
-	def __init__(self):
-		self.buffer = []
+    def __init__(self):
+        self.buffer = []
 
-	def append(self, conn, data):
-		self.buffer.append([conn, data])
+    def append(self, conn, data):
+        self.buffer.append([conn, data])
 
-	def send(self):
-		for package in self.buffer:
-			package[0].send(package[1])
+    def send(self):
+        for package in self.buffer:
+            package[0].send(package[1])
 
 # Default serializer for data from database
 def extract(request, object, fields):
-	data = {}
-	for field in fields:
-		data[field] = eval(fields[field])
-	return data
+    data = {}
+    for field in fields:
+        data[field] = eval(fields[field])
+    return data

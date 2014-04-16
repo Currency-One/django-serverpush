@@ -1,4 +1,4 @@
-import logging
+# -*- coding: utf-8 -*-
 from os import path as op
 
 import tornado.web
@@ -9,52 +9,61 @@ import tornadio2.server
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from serverpush.cache import patch
-from serverpush.connection import Connection
-from serverpush.notifier import Notifier, NotifierThread
-from serverpush.tracker import Tracker
+from devlib.serverpush.cache import patch
+from devlib.serverpush.connection import Connection
+from devlib.serverpush.notifier import Notifier
+from devlib.serverpush.tracker import Tracker
 
-logger = logging.getLogger('serverpush')
 
 class Command(BaseCommand):
-	def handle(self, *args, **options):
-		# set tracker object
-		Connection.tracker = Notifier.tracker = Tracker()
+    def handle(self, *args, **options):
+        # set tracker object
+        Connection.tracker = Notifier.tracker = Tracker()
 
-		# use the routes classmethod to build the correct resource
-		router = tornadio2.router.TornadioRouter(Connection, {
-			'enabled_protocols': [
-				'websocket',
-				'xhr-polling',
-				'htmlfile'
-			]
-		})
+        # use the routes classmethod to build the correct resource
+        router = tornadio2.router.TornadioRouter(Connection,
+            dict(websocket_check=False,
+                enabled_protocols=[
+                'websocket',
+                #'flashsocket',
+                'xhr-polling',
+                'jsonp-polling',
+                'htmlfile',
+                ]
+            )
+        )
 
-		# configure the Tornado application
-		application = tornado.web.Application(
-			router.urls,
-			socket_io_port = settings.SERVERPUSH_PORT
-		)
+        r = router.apply_routes([
+             #(r"/WebSocketMain.swf", WebSocketFileHandler),
+        ])
+        # configure the Tornado application
+        application = tornado.web.Application(r,
+            socket_io_port=settings.SERVERPUSH_PORT,
+            flash_policy_port=getattr(settings, 'SERVERPUSH_FLASH_PORT', 10843),
+            flash_policy_file=op.join(settings.ROOT_PATH, "flashpolicy.xml"),
+        )
 
-		# configure Tornadio log, serverpush log is configured in settings.py
-		if settings.TORNADIO_LOG:
-			handler = logging.FileHandler(settings.TORNADIO_LOG)
-			handler.setFormatter(logging.Formatter('%(asctime)-6s:  %(levelname)s - %(message)s'))
-			logging.getLogger().addHandler(handler)
-			logging.getLogger().setLevel(logging.WARNING)
+        notifier = tornado.web.Application(
+            [(r"/notify", Notifier)],
+        )
+        notifier.listen(settings.SERVERPUSH_NOTIFIER_PORT, '0.0.0.0')
 
-		# patch django orm
-		patch()
+        #logger.setLevel(logging.INFO if getattr(settings, "PRODUCTION", False) else logging.DEBUG)
 
-		logger.info('Serverpush starting up!')
+        # patch django orm
+        patch()
 
-		notifier = NotifierThread()
-		notifier.daemon = True
+        ssl_options = None
+        if getattr(settings, "SERVERPUSH_PROTOCOL", "HTTP") == "HTTPS":
+            cert = getattr(settings, "SSL_CERT", None)
+            cert_key = getattr(settings, "SSL_CERT_KEY", None)
+            if cert and cert_key and op.exists(cert) and op.exists(cert_key):
+                ssl_options = {
+                    "certfile": cert,
+                    "keyfile": cert_key,
+                }
+        try:
+            tornadio2.server.SocketServer(application, ssl_options=ssl_options)
 
-		try:
-			notifier.start()
-			tornadio2.server.SocketServer(application)	
-		except KeyboardInterrupt:
-			print "Ctr+C pressed; Exiting."
-		except Exception, e:
-			logger.exception(e)
+        except KeyboardInterrupt:
+            print "Ctr+C pressed; Exiting."

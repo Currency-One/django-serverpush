@@ -1,93 +1,147 @@
+# -*- coding: utf-8 -*-
 '''
-	Tracker groups connections and events into channels.
+    Tracker groups connections and events into channels.
 '''
-
-import time
 import logging
 
-from django.conf import settings
-from django.core.urlresolvers import resolve
-
 from channel import Channel
-from cache import cache_sql
+from events import *
+
+from devlib.serverpush.active_events import active_events
 
 logger = logging.getLogger('serverpush')
 
-class Tracker():
-	def __init__(self):
-		# Channels
-		self.channels = {}
 
-		# Global filter functions
-		self.globals = []
-		for func_path in settings.SERVERPUSH_GLOBALS:
-			self.globals.append(getattr(__import__(func_path.rsplit('.', 1)[0], globals(), locals(), [func_path.rsplit('.', 1)[-1]]), func_path.rsplit('.', 1)[-1]))
+class Tracker(object):
 
-		self.next_id = 1
+    def generate_id(self):
+        ids = 1
+        while 1:
+            yield ids
+            ids += 1
 
-	# Connection calls this method to register itself
-	def connect(self, conn):
-		start_time = time.time()
+    def __init__(self):
 
-		# assign id to the connection
-		conn.id = self.next_id
-		self.next_id += 1
+        # mapa: event -> user_id -> connection
+        self.channels = {}
+        # mapa: user_id -> lista eventow
+        self.users = {}
 
-		# get global filters
-		filters = []
-		for func in self.globals:
-			filters += func(conn.request)
+        self.id_gen = self.generate_id()
+        #historia
+        self.history = {}
+        self.shared = {}
+        for ev in store_history:
+            self.history[ev] = EventHistory(ev, active_events[ev]._event_type)
 
-		try:
-			# url resolve
-			func, args, kwargs = resolve(conn.request.path)
-			# get _update function
-			func = getattr(__import__(func.__module__, globals(), locals(), [func.__name__ + '_update']), func.__name__ + '_update')
-		except: #TODO: catch only 404 and failed import
-			func = None
+        for ev in active_events:
+            self.channels[ev] = Channel(ev, tracker=self,
+                                        history=self.history.get(ev, None))
 
-		if func: # if function _update is defined
-			filters += func(conn.request, *args, **kwargs)
+    def connect(self, conn):
+        '''
+            Nawiazywanie polaczenia, inicjalizujace eventy
+        '''
+        #jesli uzytkonik zalogowany id -> pk usera
+        #if conn.request.user.is_authenticated():
+        #    conn.id = conn.request.user.pk
 
-		for filter in filters:
-			# resolve model to string
-			model = filter['model'].__module__ + '.' + filter['model'].__name__
-			# create a new channel for this model
-			if model not in self.channels: self.channels[model] = Channel()
-			# add filter to the channel
-			self.channels[model].newFilter(conn, filter)
+        conn.id = self.id_gen.next()
+        user_id = conn.get_user_id()
 
-		logger.info('New connection (%s), done in %.2f.', conn.request.path, time.time() - start_time)
+        logger.debug("New connection; user %s; path %s; conn_id %s " % (user_id,
+                conn.request.path_info, conn.id))
 
-	# Connection calls this method to unregister itself
-	def disconnect(self, conn):
-		for channel in self.channels:
-			if conn.id in self.channels[channel].connections:
-				del self.channels[channel].connections[conn.id]
+        if user_id not in self.users:
+            self.users[user_id] = {}
 
-	# Called by notify.py as a callback via server.py on a new event
-	# notifies other connections and returns success status
-	@cache_sql
-	def event(self, model, id):
-		start_time = time.time()
+        #tworzymy kanaly dla wspieranych eventow i doklejamy zdarzenia
+        for event in conn.events:
+            if active_events.has_key(event):
+                #niezalogowani uzytkownicy moga odbierac tylko broadcasty
+                if active_events[event].is_init_event():
+                    Channel.init_event(conn, event, shared=self.shared)
 
-		# resolve model and id to object
-		try:
-			object = getattr(__import__(model.rsplit('.', 1)[0], globals(), locals(), [model.split('.')[-1]]), model.split('.')[-1]).objects.filter(pk = id)
-		except:
-			return False
+                if self.history.has_key(event):
+                    self.history[event].send_history(conn)
 
-		if not object.exists():
-			return False
+                if not (active_events[event].is_broadcast_event() or
+                        conn.request.user.is_authenticated()):
+                    continue
 
-		# if no one is on the channel we might need to create it
-		# it is important not to just skip it because of the history
-		if model not in self.channels:
-			self.channels[model] = Channel()
+                #XXX: nadmiarowe, w konstruktorze wszystkie kanaly sa inicjalizowane
+                if not self.channels.has_key(event):
+                    logger.error('Brak kanalu %s, to niepowinno miec miejsca' % event)
+                    self.channels[event] = Channel(event, tracker=self,
+                                        history=self.history.get(event, None))
 
-		# pass the job to the channel
-		r = self.channels[model].event(object)
+                if not self.users[user_id].has_key(event):
+                    self.users[user_id][event] = True
 
-		logger.info('Event (%s:%s), done in %.2f.', model, id, time.time() - start_time)
+                self.channels[event].new_connection(conn)
 
-		return r
+    def disconnect(self, conn):
+        '''
+            Czyszczenie kolekcji po utracie polaczenia
+        '''
+        user_id = conn.get_user_id()
+
+        if not self.users.has_key(user_id):
+            #nie powinno sie zdarzyc, ale 'just in case'
+            return
+
+        #uwzglednia anonimowe polaczenia
+        #XXX: moze sprawdzac czy mapowanie istnieje,
+        #teoretycznie wieksza szansa ze beda nadmiarowe dane, niz ich nie bedzie
+        for event in self.users[user_id].keys():
+            try:
+                del self.channels[event].connections[user_id][conn.id]
+                logger.debug("Disconnect: user %s; conn_id %s; event %s" % (
+                    user_id, conn.id, event
+                ))
+                if not self.channels[event].connections[user_id]:
+                    del self.channels[event].connections[user_id]
+            except AttributeError:
+                continue
+            except KeyError:
+                continue
+
+    # Caled by notify.py as a callback via server.py on a new event
+    # notifies other connections and returns success status
+    def event(self, event, gen_timestamp, user=None, **kwargs):
+        '''
+            Odpalany przez notifier po otrzymaniu requesta
+        '''
+        if user:
+            user = int(user)
+
+        if event == ServerPushEvent.SOCKETIO_LOGOUT:
+            self.logout_event(user)
+            return
+
+        channel = self.channels.get(event, None)
+
+        if channel:
+            if channel.event.is_broadcast_event():
+                channel.broadcast_event(gen_timestamp, **kwargs)
+
+            elif channel.event.is_user_event():
+                channel.user_event(user, **kwargs)
+
+    def logout_event(self, user):
+        '''
+            Zdarzenie wylogowania -> przeladowuje wszystkie
+            strony aktualnie zalogowanego uzytkownika
+        '''
+        logger.debug("Logout: user %s" % user)
+        #wysylamy conajwyzej jeden komunikat do polaczenia
+        connections_notified = {}
+        if user is not None:
+            if not self.users.has_key(user):
+                return
+
+            for event in self.users[user].keys():
+                self.channels[event].logout_event(user, connections_notified)
+
+        for con_id, con in connections_notified.items():
+            self.disconnect(con)
