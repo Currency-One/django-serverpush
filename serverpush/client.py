@@ -10,17 +10,15 @@ import inspect
 from django.conf import settings
 from django.contrib.auth.models import User
 
-from devlib.serverpush.events import (
+from .events import (
     ServerPushEventException,
     ServerPushEvent
 )
+from .active_events import active_events
 
 from celery.task import task
 
 logger = logging.getLogger('serverpush')
-
-
-from devlib.serverpush.active_events import active_events
 
 
 class PingNotifierException(Exception):
@@ -31,11 +29,11 @@ def ping_notifier(event, user=None, celery_task=True,  **kwargs):
     '''
         Sygnalizuje zdarzenie @event, dla uzytkownika @user (instancja / pk) , @kwargs sa przekazywane do handlera
     '''
-    if settings.IS_TEST: # SKip dla testow
+    if settings.IS_TEST:  # SKip dla testow
         return False
 
     force_celery_task = getattr(settings, 'SERVERPUSH_NOTIFIER_CELERY_TASK', None)
-    tm = time.time()#timestamp zlecenia powiadomienia
+    tm = time.time()  # timestamp zlecenia powiadomienia
 
     logger.info(inspect.getouterframes(inspect.currentframe())[1][1:])
 
@@ -59,22 +57,22 @@ def ping_notifier_task(event, gen_timestamp, user=None, **kwargs):
             raise ServerPushEventException('Niezarejestrowany event: %s' % event)
 
         if not user and not active_events[event].is_broadcast_event():
-            raise ServerPushEventException(\
-                    'Brak id usera a zdarzenie nie jest broadcastem: %s' % event)
+            raise ServerPushEventException(
+                'Brak id usera a zdarzenie nie jest broadcastem: %s' % event)
 
         data = {
-                'event' : event,
-                'user' : user.pk if isinstance(user, User) else user,
-                'gen_timestamp' : gen_timestamp,
-            }
+            'event': event,
+            'user': user.pk if isinstance(user, User) else user,
+            'gen_timestamp': gen_timestamp,
+        }
         if not user:
             del data['user']
 
         data.update(kwargs)
 
         url = 'http://%s:%d/notify' % (settings.SERVERPUSH_NOTIFIER_HOST,
-                settings.SERVERPUSH_NOTIFIER_PORT)
-        urllib.urlopen(url,urllib.urlencode(data))
+                                       settings.SERVERPUSH_NOTIFIER_PORT)
+        urllib.urlopen(url, urllib.urlencode(data))
 
     except Exception as e:
         logger.error(e)

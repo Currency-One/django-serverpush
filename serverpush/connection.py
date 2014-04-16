@@ -9,7 +9,15 @@ from django.contrib.auth.models import (
     AnonymousUser,
 )
 
-from devlib.base.session import SessionStore
+# odpowiedni SesisonStore na podstawie konfiguracji
+if getattr(settings, 'SESSION_ENGINE') == 'django.contrib.sessions.backends.cache':
+    from django.contrib.sessions.backends.cache import SessionStore
+elif getattr(settings, 'SESSION_ENGINE') == 'django.contrib.sessions.backends.cached_db':
+    from django.contrib.sessions.backends.cached_db import SessionStore
+elif getattr(settings, 'SESSION_ENGINE') == 'redis_sessions.session':
+    from redis_sessions.session import SessionStore
+else:
+    from django.contrib.sessions.backends.db import SessionStore
 
 from .exceptions import catch_exceptions
 from .events import incoming_messages

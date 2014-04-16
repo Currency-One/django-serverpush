@@ -9,10 +9,10 @@ import tornadio2.server
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from devlib.serverpush.cache import patch
-from devlib.serverpush.connection import Connection
-from devlib.serverpush.notifier import Notifier
-from devlib.serverpush.tracker import Tracker
+from .cache import patch
+from .connection import Connection
+from .notifier import Notifier
+from .tracker import Tracker
 
 
 class Command(BaseCommand):
