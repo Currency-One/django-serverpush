@@ -9,10 +9,10 @@ import tornadio2.server
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from .cache import patch
-from .connection import Connection
-from .notifier import Notifier
-from .tracker import Tracker
+from serverpush.cache import patch
+from serverpush.connection import Connection
+from serverpush.notifier import Notifier
+from serverpush.tracker import Tracker
 
 
 class Command(BaseCommand):
@@ -40,7 +40,7 @@ class Command(BaseCommand):
         application = tornado.web.Application(r,
             socket_io_port=settings.SERVERPUSH_PORT,
             flash_policy_port=getattr(settings, 'SERVERPUSH_FLASH_PORT', 10843),
-            flash_policy_file=op.join(settings.ROOT_PATH, "flashpolicy.xml"),
+            flash_policy_file=settings.SERVERPUSH_FLASHPOLICY,
         )
 
         notifier = tornado.web.Application(

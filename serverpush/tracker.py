@@ -7,7 +7,7 @@ import logging
 from channel import Channel
 from events import *
 
-from .active_events import active_events
+from serverpush.active_events import active_events
 
 logger = logging.getLogger('serverpush')
 
