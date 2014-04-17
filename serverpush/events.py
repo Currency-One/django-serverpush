@@ -98,4 +98,4 @@ def serverpush_userevent(user, a=None, **kwargs):
 incoming_messages = {
 }
 events_module = __import__(settings.SERVEREVENTS_MODULE)
-store_history = getattr(events_module, 'STORE_HISTORY')
+store_history = getattr(events_module, 'STORE_HISTORY', [])

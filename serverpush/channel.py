@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 
-from .active_events import active_events
+from serverpush.active_events import active_events
 
 
 logger = logging.getLogger('serverpush')
