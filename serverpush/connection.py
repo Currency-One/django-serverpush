@@ -12,6 +12,8 @@ from django.contrib.auth.models import (
 # odpowiedni SesisonStore na podstawie konfiguracji
 if getattr(settings, 'SESSION_ENGINE') == 'django.contrib.sessions.backends.cache':
     from django.contrib.sessions.backends.cache import SessionStore
+elif getattr(settings, 'SESSION_ENGINE') == 'django.contrib.sessions.backends.db':
+    from django.contrib.sessions.backends.db import SessionStore
 elif getattr(settings, 'SESSION_ENGINE') == 'django.contrib.sessions.backends.cached_db':
     from django.contrib.sessions.backends.cached_db import SessionStore
 elif getattr(settings, 'SESSION_ENGINE') == 'redis_sessions.session':
